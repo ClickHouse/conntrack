@@ -193,6 +193,36 @@ func (c *Conn) Dump(opts *DumpOptions) ([]Flow, error) {
 	return unmarshalFlows(nlm)
 }
 
+// DumpFlowFilter gets all Conntrack connections from the kernel in the form of a list
+// of Flow objects, but only returns flows that pass the provided FlowFilter.
+// This avoids pre-allocating large slices and reduces memory usage when filtering.
+func (c *Conn) DumpFlowFilter(filter FlowFilter, opts *DumpOptions) ([]Flow, error) {
+	msgType := ctGet
+	if opts != nil && opts.ZeroCounters {
+		msgType = ctGetCtrZero
+	}
+
+	req, err := netfilter.MarshalNetlink(
+		netfilter.Header{
+			SubsystemID: netfilter.NFSubsysCTNetlink,
+			MessageType: netfilter.MessageType(msgType),
+			Family:      netfilter.ProtoUnspec, // ProtoUnspec dumps both IPv4 and IPv6
+			Flags:       netlink.Request | netlink.Dump,
+		},
+		nil)
+
+	if err != nil {
+		return nil, err
+	}
+
+	nlm, err := c.conn.Query(req)
+	if err != nil {
+		return nil, err
+	}
+
+	return unmarshalFlowsWithFilter(nlm, filter)
+}
+
 // DumpFilter gets all Conntrack connections from the kernel in the form of a list
 // of Flow objects, but only returns Flows matching the connmark specified in the Filter parameter.
 func (c *Conn) DumpFilter(f Filter, opts *DumpOptions) ([]Flow, error) {

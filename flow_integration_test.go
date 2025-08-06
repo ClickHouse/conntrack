@@ -377,6 +377,62 @@ func TestConnDumpFilter(t *testing.T) {
 	assert.Len(t, d, len(flows))
 }
 
+// TestConnDumpFlowFilter tests the DumpFlowFilter functionality with protocol filtering.
+func TestConnDumpFlowFilter(t *testing.T) {
+	c, _, err := makeNSConn()
+	require.NoError(t, err)
+
+	// Create flows with different protocols
+	flows := map[string]Flow{
+		"tcp1": NewFlow(6, 0, netip.MustParseAddr("1.2.3.4"), netip.MustParseAddr("5.6.7.8"), 1234, 80, 120, 0),       // TCP
+		"tcp2": NewFlow(6, 0, netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.2"), 5678, 443, 120, 0),    // TCP
+		"udp1": NewFlow(17, 0, netip.MustParseAddr("192.168.1.1"), netip.MustParseAddr("8.8.8.8"), 12345, 53, 120, 0), // UDP
+		"udp2": NewFlow(17, 0, netip.MustParseAddr("172.16.0.1"), netip.MustParseAddr("1.1.1.1"), 54321, 53, 120, 0),  // UDP
+	}
+
+	// Create all flows
+	for n, f := range flows {
+		err = c.Create(f)
+		require.NoError(t, err, "creating flow", n)
+	}
+
+	// Test TCP-only filter
+	tcpFilter := NewTCPOnlyFilter()
+	tcpFlows, err := c.DumpFlowFilter(tcpFilter, nil)
+	require.NoError(t, err, "dumping TCP-only flows")
+	require.Len(t, tcpFlows, 2, "expecting 2 TCP flows")
+
+	for _, flow := range tcpFlows {
+		assert.Equal(t, uint8(6), flow.TupleOrig.Proto.Protocol, "all flows should be TCP")
+	}
+
+	// Test exclude UDP filter
+	excludeUDPFilter := NewExcludeUDPFilter()
+	nonUDPFlows, err := c.DumpFlowFilter(excludeUDPFilter, nil)
+	require.NoError(t, err, "dumping non-UDP flows")
+	require.Len(t, nonUDPFlows, 2, "expecting 2 non-UDP flows")
+
+	for _, flow := range nonUDPFlows {
+		assert.NotEqual(t, uint8(17), flow.TupleOrig.Proto.Protocol, "no flows should be UDP")
+	}
+
+	// Test custom protocol filter (should match UDP)
+	udpFilter := NewProtocolFilter(17, Equals)
+	udpFlows, err := c.DumpFlowFilter(udpFilter, nil)
+	require.NoError(t, err, "dumping UDP flows")
+	require.Len(t, udpFlows, 2, "expecting 2 UDP flows")
+
+	for _, flow := range udpFlows {
+		assert.Equal(t, uint8(17), flow.TupleOrig.Proto.Protocol, "all flows should be UDP")
+	}
+
+	// Clean up
+	for n, f := range flows {
+		err = c.Delete(f)
+		require.NoError(t, err, "deleting flow", n)
+	}
+}
+
 // Bench scenario that calls Conn.Create and Conn.Delete on the same Flow once per iteration.
 // This includes two marshaling operations for create/delete, two syscalls and output validation.
 func BenchmarkCreateDeleteFlow(b *testing.B) {
