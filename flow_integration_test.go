@@ -384,10 +384,10 @@ func TestConnDumpFlowFilter(t *testing.T) {
 
 	// Create flows with different protocols
 	flows := map[string]Flow{
-		"tcp1": NewFlow(6, 0, netip.MustParseAddr("1.2.3.4"), netip.MustParseAddr("5.6.7.8"), 1234, 80, 120, 0),       // TCP
-		"tcp2": NewFlow(6, 0, netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.2"), 5678, 443, 120, 0),    // TCP
-		"udp1": NewFlow(17, 0, netip.MustParseAddr("192.168.1.1"), netip.MustParseAddr("8.8.8.8"), 12345, 53, 120, 0), // UDP
-		"udp2": NewFlow(17, 0, netip.MustParseAddr("172.16.0.1"), netip.MustParseAddr("1.1.1.1"), 54321, 53, 120, 0),  // UDP
+		"tcp1": NewFlow(unix.IPPROTO_TCP, 0, netip.MustParseAddr("1.2.3.4"), netip.MustParseAddr("5.6.7.8"), 1234, 80, 120, 0),      // TCP
+		"tcp2": NewFlow(unix.IPPROTO_TCP, 0, netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.2"), 5678, 443, 120, 0),   // TCP
+		"udp1": NewFlow(unix.IPPROTO_UDP, 0, netip.MustParseAddr("192.168.1.1"), netip.MustParseAddr("8.8.8.8"), 12345, 53, 120, 0), // UDP
+		"udp2": NewFlow(unix.IPPROTO_UDP, 0, netip.MustParseAddr("172.16.0.1"), netip.MustParseAddr("1.1.1.1"), 54321, 53, 120, 0),  // UDP
 	}
 
 	// Create all flows
@@ -396,34 +396,55 @@ func TestConnDumpFlowFilter(t *testing.T) {
 		require.NoError(t, err, "creating flow", n)
 	}
 
-	// Test TCP-only filter
-	tcpFilter := NewTCPOnlyFilter()
-	tcpFlows, err := c.DumpFlowFilter(tcpFilter, nil)
-	require.NoError(t, err, "dumping TCP-only flows")
-	require.Len(t, tcpFlows, 2, "expecting 2 TCP flows")
-
-	for _, flow := range tcpFlows {
-		assert.Equal(t, uint8(6), flow.TupleOrig.Proto.Protocol, "all flows should be TCP")
+	// Define test cases
+	tests := []struct {
+		name              string
+		filter            FlowFilter
+		expectedCount     int
+		expectedProtocol  *uint8 // nil means don't check protocol
+		forbiddenProtocol *uint8 // nil means don't check
+	}{
+		{
+			name:             "TCP only filter",
+			filter:           NewTCPOnlyFilter(),
+			expectedCount:    2,
+			expectedProtocol: uint8Ptr(unix.IPPROTO_TCP), // All should be TCP
+		},
+		{
+			name:              "Exclude UDP filter",
+			filter:            NewExcludeUDPFilter(),
+			expectedCount:     2,
+			forbiddenProtocol: uint8Ptr(unix.IPPROTO_UDP), // None should be UDP
+		},
+		{
+			name:             "Custom UDP filter",
+			filter:           NewProtocolFilter(unix.IPPROTO_UDP, Equals),
+			expectedCount:    2,
+			expectedProtocol: uint8Ptr(unix.IPPROTO_UDP), // All should be UDP
+		},
 	}
 
-	// Test exclude UDP filter
-	excludeUDPFilter := NewExcludeUDPFilter()
-	nonUDPFlows, err := c.DumpFlowFilter(excludeUDPFilter, nil)
-	require.NoError(t, err, "dumping non-UDP flows")
-	require.Len(t, nonUDPFlows, 2, "expecting 2 non-UDP flows")
+	// Run test cases
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filteredFlows, err := c.DumpFlowFilter(tt.filter, nil)
+			require.NoError(t, err, "dumping flows")
+			require.Len(t, filteredFlows, tt.expectedCount)
 
-	for _, flow := range nonUDPFlows {
-		assert.NotEqual(t, uint8(17), flow.TupleOrig.Proto.Protocol, "no flows should be UDP")
-	}
+			// Check expected protocol
+			if tt.expectedProtocol != nil {
+				for _, flow := range filteredFlows {
+					assert.Equal(t, *tt.expectedProtocol, flow.TupleOrig.Proto.Protocol)
+				}
+			}
 
-	// Test custom protocol filter (should match UDP)
-	udpFilter := NewProtocolFilter(17, Equals)
-	udpFlows, err := c.DumpFlowFilter(udpFilter, nil)
-	require.NoError(t, err, "dumping UDP flows")
-	require.Len(t, udpFlows, 2, "expecting 2 UDP flows")
-
-	for _, flow := range udpFlows {
-		assert.Equal(t, uint8(17), flow.TupleOrig.Proto.Protocol, "all flows should be UDP")
+			// Check forbidden protocol
+			if tt.forbiddenProtocol != nil {
+				for _, flow := range filteredFlows {
+					assert.NotEqual(t, *tt.forbiddenProtocol, flow.TupleOrig.Proto.Protocol)
+				}
+			}
+		})
 	}
 
 	// Clean up
@@ -431,6 +452,11 @@ func TestConnDumpFlowFilter(t *testing.T) {
 		err = c.Delete(f)
 		require.NoError(t, err, "deleting flow", n)
 	}
+}
+
+// uint8Ptr returns a pointer to the given uint8 value.
+func uint8Ptr(v uint8) *uint8 {
+	return &v
 }
 
 // Bench scenario that calls Conn.Create and Conn.Delete on the same Flow once per iteration.
