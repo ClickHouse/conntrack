@@ -305,11 +305,6 @@ const (
 	NotEquals
 )
 
-const (
-	ProtocolTCP uint8 = 6
-	ProtocolUDP uint8 = 17
-)
-
 // ProtocolFilter filters flows by protocol with configurable match conditions.
 type ProtocolFilter struct {
 	Value     uint8
