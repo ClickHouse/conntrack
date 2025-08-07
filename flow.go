@@ -2,6 +2,7 @@ package conntrack
 
 import (
 	"fmt"
+	"golang.org/x/sys/unix"
 	"net/netip"
 
 	"github.com/mdlayher/netlink"
@@ -287,11 +288,79 @@ func unmarshalFlow(nlm netlink.Message) (Flow, error) {
 	return f, nil
 }
 
+// FlowFilter defines an interface for filtering flows during unmarshaling.
+// This allows extensible filtering without pre-allocating large slices.
+type FlowFilter interface {
+	// Match returns true if the flow matches the filter criteria.
+	Match(flow Flow) bool
+}
+
+// FilterCondition defines the type of comparison to perform.
+type FilterCondition int
+
+const (
+	// Equals matches when the field equals the filter value.
+	Equals FilterCondition = iota
+	// NotEquals matches when the field does not equal the filter value.
+	NotEquals
+)
+
+// ProtocolFilter filters flows by protocol with configurable match conditions.
+type ProtocolFilter struct {
+	Value     uint8
+	Condition FilterCondition
+}
+
+// Match implements FlowFilter interface for ProtocolFilter.
+func (pf ProtocolFilter) Match(flow Flow) bool {
+	protocol := flow.TupleOrig.Proto.Protocol
+	switch pf.Condition {
+	case Equals:
+		return protocol == pf.Value
+	case NotEquals:
+		return protocol != pf.Value
+	default:
+		return false
+	}
+}
+
+// NewProtocolFilter creates a ProtocolFilter with the specified value and condition.
+func NewProtocolFilter(protocol uint8, condition FilterCondition) ProtocolFilter {
+	return ProtocolFilter{
+		Value:     protocol,
+		Condition: condition,
+	}
+}
+
+// NewTCPOnlyFilter creates a filter that only allows TCP flows (protocol 6).
+func NewTCPOnlyFilter() ProtocolFilter {
+	return NewProtocolFilter(unix.IPPROTO_TCP, Equals)
+}
+
+// NewExcludeUDPFilter creates a filter that excludes UDP flows (protocol 17).
+func NewExcludeUDPFilter() ProtocolFilter {
+	return NewProtocolFilter(unix.IPPROTO_UDP, NotEquals)
+}
+
 // unmarshalFlows unmarshals a list of flows from a list of Netlink messages.
 // This method can be used to parse the result of a dump or get query.
 func unmarshalFlows(nlm []netlink.Message) ([]Flow, error) {
-	// Pre-allocate to avoid re-allocating output slice on every op
-	out := make([]Flow, 0, len(nlm))
+	return unmarshalFlowsWithFilter(nlm, nil)
+}
+
+// unmarshalFlowsWithFilter unmarshals a list of flows from a list of Netlink messages
+// and applies an optional filter. If filter is nil, all flows are included.
+// When filtering is applied, uses dynamic growth to prevent excessive memory usage with large datasets.
+// When no filter is applied, pre-allocates for optimal performance.
+func unmarshalFlowsWithFilter(nlm []netlink.Message, filter FlowFilter) ([]Flow, error) {
+	var out []Flow
+
+	// Pre-allocate only when no filtering - we know we'll need all entries
+	if filter == nil {
+		out = make([]Flow, 0, len(nlm))
+	}
+	// When filtering, start with zero capacity to let Go's growth algorithm
+	// adapt to the actual result size, optimizing memory consumption
 
 	for i := 0; i < len(nlm); i++ {
 		f, err := unmarshalFlow(nlm[i])
@@ -299,7 +368,10 @@ func unmarshalFlows(nlm []netlink.Message) ([]Flow, error) {
 			return nil, err
 		}
 
-		out = append(out, f)
+		// Apply filter if provided
+		if filter == nil || filter.Match(f) {
+			out = append(out, f)
+		}
 	}
 
 	return out, nil
