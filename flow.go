@@ -2,6 +2,7 @@ package conntrack
 
 import (
 	"fmt"
+	"golang.org/x/sys/unix"
 	"net/netip"
 
 	"github.com/mdlayher/netlink"
@@ -304,6 +305,11 @@ const (
 	NotEquals
 )
 
+const (
+	ProtocolTCP uint8 = 6
+	ProtocolUDP uint8 = 17
+)
+
 // ProtocolFilter filters flows by protocol with configurable match conditions.
 type ProtocolFilter struct {
 	Value     uint8
@@ -333,12 +339,12 @@ func NewProtocolFilter(protocol uint8, condition FilterCondition) ProtocolFilter
 
 // NewTCPOnlyFilter creates a filter that only allows TCP flows (protocol 6).
 func NewTCPOnlyFilter() ProtocolFilter {
-	return NewProtocolFilter(6, Equals)
+	return NewProtocolFilter(unix.IPPROTO_TCP, Equals)
 }
 
 // NewExcludeUDPFilter creates a filter that excludes UDP flows (protocol 17).
 func NewExcludeUDPFilter() ProtocolFilter {
-	return NewProtocolFilter(17, NotEquals)
+	return NewProtocolFilter(unix.IPPROTO_UDP, NotEquals)
 }
 
 // unmarshalFlows unmarshals a list of flows from a list of Netlink messages.
@@ -349,18 +355,18 @@ func unmarshalFlows(nlm []netlink.Message) ([]Flow, error) {
 
 // unmarshalFlowsWithFilter unmarshals a list of flows from a list of Netlink messages
 // and applies an optional filter. If filter is nil, all flows are included.
-// When filtering is applied, uses dynamic growth to prevent OOM with large datasets.
+// When filtering is applied, uses dynamic growth to prevent excessive memory usage with large datasets.
 // When no filter is applied, pre-allocates for optimal performance.
 func unmarshalFlowsWithFilter(nlm []netlink.Message, filter FlowFilter) ([]Flow, error) {
 	var out []Flow
-	
+
 	// Pre-allocate only when no filtering - we know we'll need all entries
 	if filter == nil {
 		out = make([]Flow, 0, len(nlm))
 	}
 	// When filtering, start with zero capacity to let Go's growth algorithm
-	// adapt to the actual result size, preventing OOM from over-allocation
-	
+	// adapt to the actual result size, optimizing memory consumption
+
 	for i := 0; i < len(nlm); i++ {
 		f, err := unmarshalFlow(nlm[i])
 		if err != nil {

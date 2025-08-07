@@ -194,7 +194,7 @@ func (c *Conn) Dump(opts *DumpOptions) ([]Flow, error) {
 }
 
 // DumpFlowFilter gets all Conntrack connections from the kernel in the form of a list
-// of Flow objects, but only returns flows that pass the provided FlowFilter.
+// of Flow objects, but only returns flows that match the provided FlowFilter.
 // This avoids pre-allocating large slices and reduces memory usage when filtering.
 func (c *Conn) DumpFlowFilter(filter FlowFilter, opts *DumpOptions) ([]Flow, error) {
 	msgType := ctGet
