@@ -3,6 +3,7 @@ package conntrack
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/mdlayher/netlink"
 	"github.com/pkg/errors"
@@ -47,6 +48,10 @@ func (c *Conn) Close() error {
 	c.workers.Wait()
 
 	return nil
+}
+
+func (c *Conn) SetDeadline(deadline time.Time) error {
+	return c.conn.SetDeadline(deadline)
 }
 
 // SetOption enables or disables a netlink socket option for the Conn.
