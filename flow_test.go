@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/mdlayher/netlink"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ti-mo/netfilter"
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -549,6 +551,140 @@ func TestNewFlow(t *testing.T) {
 	assert.Equal(t, want, f, "unexpected builder output")
 }
 
+// TestFlowSummaryUnmarshal verifies that FlowSummary.unmarshal correctly
+// populates tuple and counter fields, and that attributes outside its scope
+// (status, protoinfo, labels, etc.) are silently skipped, leaving those fields
+// at their zero values.
+func TestFlowSummaryUnmarshal(t *testing.T) {
+	// corpusFlowSummary maps each corpusFlow entry name to the FlowSummary we
+	// expect after unmarshaling only the tuple and counter attributes.
+	//
+	// Cases that contain no tuple or counter attributes produce a zero-valued
+	// FlowSummary — those attributes are outside the summary's scope.
+	corpusFlowSummary := map[string]FlowSummary{
+		"scalar and simple binary attributes": {},
+		"ip/port/proto tuple attributes as orig/reply/master": {
+			// TupleMaster is present in the attrs but not captured by FlowSummary.
+			TupleOrig:  flowIPPT,
+			TupleReply: flowIPPT,
+		},
+		"status attribute":               {},
+		"protoinfo attribute w/ tcp info": {},
+		"helper attribute":               {},
+		"counter attribute": {
+			CountersOrig:  Counter{Packets: 0xf00d0000, Bytes: 0xbaaaaa0000000000},
+			CountersReply: Counter{Packets: 0xb00000000000000d, Bytes: 0xfaaaaa00000000ce, Direction: true},
+		},
+		"security attribute":        {},
+		"timestamp attribute":        {},
+		"sequence adjust attribute":  {},
+		"synproxy attribute":         {},
+	}
+
+	for _, tt := range corpusFlow {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			var fs FlowSummary
+			require.NoError(t, fs.unmarshal(mustDecodeAttributes(tt.attrs)))
+
+			want, ok := corpusFlowSummary[tt.name]
+			require.True(t, ok, "no expected FlowSummary entry for corpus case %q", tt.name)
+			assert.Equal(t, want, fs)
+		})
+	}
+}
+
+// TestFlowSummaryUnmarshalError verifies that FlowSummary.unmarshal returns
+// errNotNested when a recognised attribute is present but its nested flag is
+// absent. Only the four attribute types handled by FlowSummary are tested.
+func TestFlowSummaryUnmarshalError(t *testing.T) {
+	// Subset of corpusFlowUnmarshalError relevant to FlowSummary's attribute scope.
+	summaryErrorCases := []struct {
+		name string
+		nfa  netfilter.Attribute
+	}{
+		{
+			name: "error unmarshal original tuple",
+			nfa:  netfilter.Attribute{Type: uint16(ctaTupleOrig)},
+		},
+		{
+			name: "error unmarshal reply tuple",
+			nfa:  netfilter.Attribute{Type: uint16(ctaTupleReply)},
+		},
+		{
+			name: "error unmarshal original counter",
+			nfa:  netfilter.Attribute{Type: uint16(ctaCountersOrig)},
+		},
+		{
+			name: "error unmarshal reply counter",
+			nfa:  netfilter.Attribute{Type: uint16(ctaCountersReply)},
+		},
+	}
+
+	for _, tt := range summaryErrorCases {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			var fs FlowSummary
+			err := fs.unmarshal(mustDecodeAttributes([]netfilter.Attribute{tt.nfa}))
+			assert.ErrorIs(t, err, errNotNested)
+		})
+	}
+}
+
+// TestUnmarshalFlowSummariesError verifies that errors from individual message
+// unmarshal are propagated by unmarshalFlowSummariesWithFilter.
+func TestUnmarshalFlowSummariesError(t *testing.T) {
+	// Produce a netlink message that will fail unmarshaling by supplying a
+	// recognised nested attribute type without the nested flag.
+	nlm, _ := netfilter.MarshalNetlink(netfilter.Header{}, []netfilter.Attribute{{Type: uint16(ctaTupleOrig)}})
+	_, err := unmarshalFlowSummariesWithFilter([]netlink.Message{nlm}, nil)
+	assert.ErrorIs(t, err, errNotNested)
+}
+
+// TestFlowSummaryFilterMatch verifies that ProtocolFilter satisfies
+// FlowSummaryFilter and correctly filters FlowSummary values by protocol.
+func TestFlowSummaryFilterMatch(t *testing.T) {
+	tcpSummary := FlowSummary{
+		TupleOrig: Tuple{Proto: ProtoTuple{Protocol: unix.IPPROTO_TCP}},
+	}
+	udpSummary := FlowSummary{
+		TupleOrig: Tuple{Proto: ProtoTuple{Protocol: unix.IPPROTO_UDP}},
+	}
+	zeroSummary := FlowSummary{}
+
+	t.Run("TCP only filter accepts TCP", func(t *testing.T) {
+		f := NewTCPOnlyFilter()
+		assert.True(t, f.MatchSummary(tcpSummary))
+	})
+
+	t.Run("TCP only filter rejects UDP", func(t *testing.T) {
+		f := NewTCPOnlyFilter()
+		assert.False(t, f.MatchSummary(udpSummary))
+	})
+
+	t.Run("exclude UDP filter accepts TCP", func(t *testing.T) {
+		f := NewExcludeUDPFilter()
+		assert.True(t, f.MatchSummary(tcpSummary))
+	})
+
+	t.Run("exclude UDP filter rejects UDP", func(t *testing.T) {
+		f := NewExcludeUDPFilter()
+		assert.False(t, f.MatchSummary(udpSummary))
+	})
+
+	t.Run("default condition returns false", func(t *testing.T) {
+		// FilterCondition value outside the handled cases.
+		f := ProtocolFilter{Value: unix.IPPROTO_TCP, Condition: FilterCondition(99)}
+		assert.False(t, f.MatchSummary(zeroSummary))
+	})
+}
+
+// TestFlowSummarySize sanity-checks that FlowSummary is smaller than Flow.
+// This confirms the type achieves its stated goal of reduced memory footprint.
+func TestFlowSummarySize(t *testing.T) {
+	assert.Less(t, int(unsafe.Sizeof(FlowSummary{})), int(unsafe.Sizeof(Flow{})))
+}
+
 func BenchmarkFlowUnmarshal(b *testing.B) {
 	b.ReportAllocs()
 
@@ -570,5 +706,30 @@ func BenchmarkFlowUnmarshal(b *testing.B) {
 
 		var f Flow
 		_ = f.unmarshal(&iad)
+	}
+}
+
+func BenchmarkFlowSummaryUnmarshal(b *testing.B) {
+	b.ReportAllocs()
+
+	// Collect all test.attrs from corpus. This gives FlowSummary a realistic
+	// input that contains both the attributes it cares about (tuples, counters)
+	// and those it silently skips (protoinfo, labels, etc.).
+	var tests []netfilter.Attribute
+	for _, test := range corpusFlow {
+		tests = append(tests, test.attrs...)
+	}
+
+	// Marshal these netfilter attributes and return netlink.AttributeDecoder.
+	ad := mustDecodeAttributes(tests)
+
+	b.ResetTimer()
+
+	for n := 0; n < b.N; n++ {
+		// Make a new copy of the AD to avoid reinstantiation.
+		iad := *ad
+
+		var fs FlowSummary
+		_ = fs.unmarshal(&iad)
 	}
 }
