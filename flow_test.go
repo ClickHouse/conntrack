@@ -641,6 +641,92 @@ func TestUnmarshalFlowSummariesError(t *testing.T) {
 	assert.ErrorIs(t, err, errNotNested)
 }
 
+// makeFlowSummaryNLM creates a netlink.Message that unmarshalFlowSummary can
+// parse. The message contains an orig tuple with the given protocol number.
+func makeFlowSummaryNLM(proto uint8) netlink.Message {
+	attrs := []netfilter.Attribute{
+		{
+			Type:   uint16(ctaTupleOrig),
+			Nested: true,
+			Children: []netfilter.Attribute{
+				{
+					Type:   uint16(ctaTupleIP),
+					Nested: true,
+					Children: []netfilter.Attribute{
+						{Type: uint16(ctaIPv4Src), Data: []byte{10, 0, 0, 1}},
+						{Type: uint16(ctaIPv4Dst), Data: []byte{10, 0, 0, 2}},
+					},
+				},
+				{
+					Type:   uint16(ctaTupleProto),
+					Nested: true,
+					Children: []netfilter.Attribute{
+						{Type: uint16(ctaProtoNum), Data: []byte{proto}},
+						{Type: uint16(ctaProtoSrcPort), Data: []byte{0x04, 0xd2}},  // 1234
+						{Type: uint16(ctaProtoDstPort), Data: []byte{0x00, 0x50}},   // 80
+					},
+				},
+			},
+		},
+	}
+
+	nlm, _ := netfilter.MarshalNetlink(netfilter.Header{}, attrs)
+	return nlm
+}
+
+// TestUnmarshalFlowSummariesInto_BufferReuse verifies that when a pre-allocated
+// buffer is passed, the backing array is reused (pointer equality).
+func TestUnmarshalFlowSummariesInto_BufferReuse(t *testing.T) {
+	msgs := []netlink.Message{makeFlowSummaryNLM(6), makeFlowSummaryNLM(17)}
+	buf := make([]FlowSummary, 0, 10)
+	bufPtr := &buf[:1][0] // pointer to element 0's slot in the backing array
+
+	out, err := unmarshalFlowSummariesInto(buf, msgs, nil)
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+
+	// The backing array should be the same (didn't grow beyond cap 10).
+	outPtr := &out[:1][0]
+	assert.Equal(t, bufPtr, outPtr, "expected backing array reuse")
+}
+
+// TestUnmarshalFlowSummariesInto_NilBuffer verifies that passing a nil buf
+// allocates a fresh slice (same behaviour as unmarshalFlowSummariesWithFilter).
+func TestUnmarshalFlowSummariesInto_NilBuffer(t *testing.T) {
+	msgs := []netlink.Message{makeFlowSummaryNLM(6)}
+
+	out, err := unmarshalFlowSummariesInto(nil, msgs, nil)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	assert.Equal(t, uint8(6), out[0].TupleOrig.Proto.Protocol)
+}
+
+// TestUnmarshalFlowSummariesInto_NoDataLeak verifies that reusing a buffer
+// does not leak stale data from a previous call.
+// TestUnmarshalFlowSummariesInto_WithFilter verifies that filtering works
+// with the Into variant.
+func TestUnmarshalFlowSummariesInto_WithFilter(t *testing.T) {
+	msgs := []netlink.Message{makeFlowSummaryNLM(6), makeFlowSummaryNLM(17), makeFlowSummaryNLM(6)}
+	buf := make([]FlowSummary, 0, 10)
+	filter := NewTCPOnlyFilter()
+
+	out, err := unmarshalFlowSummariesInto(buf, msgs, filter)
+	require.NoError(t, err)
+	require.Len(t, out, 2, "only TCP flows should be included")
+	for _, fs := range out {
+		assert.Equal(t, uint8(unix.IPPROTO_TCP), fs.TupleOrig.Proto.Protocol)
+	}
+}
+
+// TestUnmarshalFlowSummariesInto_Error verifies that errors from individual
+// message unmarshal are propagated.
+func TestUnmarshalFlowSummariesInto_Error(t *testing.T) {
+	bad, _ := netfilter.MarshalNetlink(netfilter.Header{}, []netfilter.Attribute{{Type: uint16(ctaTupleOrig)}})
+	buf := make([]FlowSummary, 0, 4)
+	_, err := unmarshalFlowSummariesInto(buf, []netlink.Message{bad}, nil)
+	assert.ErrorIs(t, err, errNotNested)
+}
+
 // TestFlowSummaryFilterMatch verifies that ProtocolFilter satisfies
 // FlowSummaryFilter and correctly filters FlowSummary values by protocol.
 func TestFlowSummaryFilterMatch(t *testing.T) {

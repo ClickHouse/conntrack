@@ -461,6 +461,30 @@ func unmarshalFlowsWithFilter(nlm []netlink.Message, filter FlowFilter) ([]Flow,
 	return out, nil
 }
 
+// unmarshalFlowSummariesInto unmarshals FlowSummary values from Netlink
+// messages into the provided buffer, reslicing it to [:0] first. If buf is
+// nil, a new slice is allocated. The returned slice may have a different
+// backing array if it grew beyond buf's capacity.
+func unmarshalFlowSummariesInto(buf []FlowSummary, nlm []netlink.Message, filter FlowSummaryFilter) ([]FlowSummary, error) {
+	var out []FlowSummary
+	if buf != nil {
+		out = buf[:0]
+	}
+
+	for i := 0; i < len(nlm); i++ {
+		fs, err := unmarshalFlowSummary(nlm[i])
+		if err != nil {
+			return nil, err
+		}
+
+		if filter == nil || filter.MatchSummary(fs) {
+			out = append(out, fs)
+		}
+	}
+
+	return out, nil
+}
+
 // unmarshalFlowSummariesWithFilter unmarshals a list of FlowSummary values from
 // a list of Netlink messages and applies an optional filter. If filter is nil,
 // all summaries are included and the result slice is pre-allocated.

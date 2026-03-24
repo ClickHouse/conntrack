@@ -249,6 +249,23 @@ func (c *Conn) DumpFlowFilter(filter FlowFilter, opts *DumpOptions) ([]Flow, err
 // unneeded entries. Only tuple and counter attributes are decoded, making this
 // significantly cheaper than DumpFlowFilter for high-volume paths.
 func (c *Conn) DumpFlowSummaryFilter(filter FlowSummaryFilter, opts *DumpOptions) ([]FlowSummary, error) {
+	return c.dumpFlowSummaryFilterInto(nil, filter, opts)
+}
+
+// DumpFlowSummaryFilterInto is like DumpFlowSummaryFilter but writes results
+// into the caller-provided buf (resliced to [:0]). This allows callers to
+// reuse a buffer across calls (e.g. via sync.Pool) and avoid repeated heap
+// allocations in hot loops. If buf is nil, behaviour is identical to
+// DumpFlowSummaryFilter.
+func (c *Conn) DumpFlowSummaryFilterInto(buf []FlowSummary, filter FlowSummaryFilter, opts *DumpOptions) ([]FlowSummary, error) {
+	return c.dumpFlowSummaryFilterInto(buf, filter, opts)
+}
+
+// dumpFlowSummaryFilterInto is the shared implementation for
+// DumpFlowSummaryFilter and DumpFlowSummaryFilterInto. When buf is non-nil,
+// results are appended into the resliced buffer; when nil, a fresh slice is
+// allocated internally.
+func (c *Conn) dumpFlowSummaryFilterInto(buf []FlowSummary, filter FlowSummaryFilter, opts *DumpOptions) ([]FlowSummary, error) {
 	msgType := ctGet
 	family := netfilter.ProtoUnspec
 	if opts != nil {
@@ -278,7 +295,7 @@ func (c *Conn) DumpFlowSummaryFilter(filter FlowSummaryFilter, opts *DumpOptions
 		return nil, err
 	}
 
-	return unmarshalFlowSummariesWithFilter(nlm, filter)
+	return unmarshalFlowSummariesInto(buf, nlm, filter)
 }
 
 // DumpFilter gets all Conntrack connections from the kernel in the form of a list
